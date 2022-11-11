@@ -8,10 +8,22 @@ from tqdm import tqdm
 class BaseSplineModel(object):
     def __init__(self, data, N_possible_knots, xrange, height_prior_range, interp_type='linear'):
         """
-
-        :param Nsplines: `int` number of potential knots to use
-        :param xrange: `tuple` tuple of (low xvalue, high xvalue)
-        :param height_prior: `tuple` tuple of (low yvalue, high yvalue) at each knot.
+        Params:
+        ------
+        data : `object`
+            Abstract data object that gets passed to the likelihood
+            and used in calculating the likelihood
+        N_possible_knots : `int`
+            number of possible knots
+        xrange : `tuple`
+            low and high values on the x-axis  (low, high)
+            between which we place the N knots.
+        height_prior_range : `tuple`
+            low and high values for the uniform prior on the heights
+            of the knots
+        interp_type : `str`
+            interpolation type. "linear," "cubic" and "akima" are
+            the valid options.
         """
         self.data = data
         self.N_possible_knots = N_possible_knots
@@ -32,6 +44,10 @@ class BaseSplineModel(object):
 
 
     def evaluate_interp_model(self, xvals_to_evaluate, heights, config):
+        """
+        based on the supplied configuration and heights of the knots
+        evaluate the model at `xvals_to_evaluate`.
+        """
         if np.sum(config) == 0:
             return np.zeros(xvals_to_evaluate.size)
         elif np.sum(config) == 1:
@@ -58,6 +74,10 @@ class BaseSplineModel(object):
 
 
     def propose_birth_move(self):
+        """
+        propose to add "turn on" one of the available knots
+        from the list of knots that are currently turned off.
+        """
         if np.sum(self.configuration) == self.N_possible_knots:
             return (-np.inf, -np.inf, self.configuration, self.current_heights)
         else:
@@ -71,6 +91,9 @@ class BaseSplineModel(object):
             return new_ll, 0, new_config, new_heights
 
     def propose_death_move(self):
+        """
+        propose to "turn off" one of the current knots that are turned on.
+        """
         if np.sum(self.configuration) == 0:
             return (-np.inf, -np.inf, self.configuration, self.current_heights)
         else:
@@ -87,7 +110,11 @@ class BaseSplineModel(object):
             return new_ll, 0, new_config, new_heights
 
     def propose_change_amplitude_gaussian(self):
-
+        """
+        Pick one of the knots that are turned
+        on and propose to change
+        its height by some small amount.
+        """
         # random point to turn on
         if np.sum(self.configuration) == 0:
             return -np.inf, -np.inf, self.configuration, self.current_heights
@@ -105,6 +132,10 @@ class BaseSplineModel(object):
         return new_ll, 0, self.configuration, new_heights
 
     def propose_change_amplitude_prior_draw(self):
+        """
+        choose one of the knots that are turned on and propose
+        a new height that is drawn from the prior.
+        """
         if np.sum(self.configuration) == 0:
             return -np.inf, -np.inf, self.configuration, self.current_heights
 
@@ -120,9 +151,37 @@ class BaseSplineModel(object):
 
     def sample(self, Niterations, proposal_weights=[1, 1, 1, 1], prior_test=False,
                start_config=None, start_heights=None):
+        """
+        Run RJMCMC sampler
+
+        Parameters:
+        -----------
+        Niterations : `int`
+            Number of MCMC samples
+        proposal_weights : `list` or `np.ndarray`, optional
+            list of weights for proposals. In order they are currently:
+                [birth, death, prior draw, gaussian]
+        prior_test : `bool`, optional, default=False
+            If True, it sets likelihood to 0 always and
+            samples only from the prior. Vital to check that
+            when adding new proposals you still get back the prior.
+        start_config : `np.ndarray`, optional, default=None
+            Array of boolean values that turn on or off certain knots.
+        start_heights: `np.ndarray`, optional, default=None
+            Array of starting heights for the knots.
+
+        Returns:
+        --------
+        results : `SamplerResults`
+            sampler results object that contains configurations,
+            heights, acceptances, likelihoods, and proposal types
+            for each MCMC step.
+
+            configurations = (Nsamples x Nspline points), for example.
+        """
 
         if start_config is not None:
-            if np.size(start_config)==self.N_possible_knots:
+            if np.size(start_config) == self.N_possible_knots:
                 self.configuration = start_config
             else:
                 print('Start config you entered is not compatible...starting with all knots on')

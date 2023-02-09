@@ -60,6 +60,7 @@ class BaseSplineModel(object):
                                  extrapolate=True)
         elif self.interp_type == 'akima':
             myfunc = Akima1DInterpolator(self.available_knots[config], heights[config])
+            return myfunc(xvals_to_evaluate, extrapolate=True)
         else:
             raise ValueError('available spline types are "linear," "cubic" and "akima"')
         return myfunc(xvals_to_evaluate)
@@ -149,7 +150,7 @@ class BaseSplineModel(object):
         new_ll = self.ln_likelihood(self.configuration, new_heights)
         return new_ll, 0, self.configuration, new_heights
 
-    def sample(self, Niterations, proposal_weights=[1, 1, 1, 1], prior_test=False,
+    def sample(self, Niterations, proposal_weights=(10, 10, 1, 1), prior_test=False,
                start_config=None, start_heights=None):
         """
         Run RJMCMC sampler
@@ -209,12 +210,29 @@ class BaseSplineModel(object):
             myval = np.random.rand()
             # choose proposal function with weights that were specified
             proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
+            # while np.sum(self.configuration) == 0 and proposal_idx == 1:
+            #     proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
+            # while np.sum(self.configuration) == np.size(self.configuration) and proposal_idx == 0:
+            #     proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
 
             # get proposed points
             proposed_ll, proposed_logR, proposed_config, proposed_heights = proposals[proposal_idx]()
             if prior_test:
                 proposed_ll = 0
-            hastings_ratio = min(np.log(1), proposed_ll - current_ll + proposed_logR)
+                
+            # need to handle ratio of probabilities of birth vs. death proposals
+            # because prob(n -> n+1) would be different from prob(n+1 -> n)
+            # if ratio with which we make proposals is different.
+            # this is subtle...usually the ratio of *which* proposals you choose
+            # doesn't matter
+            if proposal_idx == 0:
+                q = np.log(proposal_weights[1] / proposal_weights[0])
+            elif proposal_idx ==1:
+                q = np.log(proposal_weights[0] / proposal_weights[1])
+            else:
+                q = 0
+
+            hastings_ratio = min(np.log(1), proposed_ll - current_ll + proposed_logR + q)
             compare_val = np.log(np.random.rand())
 
             if compare_val < hastings_ratio:

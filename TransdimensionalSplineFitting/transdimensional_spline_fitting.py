@@ -5,8 +5,11 @@ from abc import abstractmethod
 from copy import deepcopy
 from tqdm import tqdm
 
+
+
 class BaseSplineModel(object):
-    def __init__(self, data, N_possible_knots, xrange, height_prior_range, interp_type='linear'):
+    def __init__(self, data, N_possible_knots, xrange, height_prior_range, interp_type='linear', log_output=False,
+                 log_space_xvals=True, birth_uniform_frac=0.5, min_knots=2, birth_gauss_scalefac=1):
         """
         Params:
         ------
@@ -25,41 +28,58 @@ class BaseSplineModel(object):
             interpolation type. "linear," "cubic" and "akima" are
             the valid options.
         """
+        self.birth_uniform_frac = birth_uniform_frac
+        self.birth_gauss_scalefac = birth_gauss_scalefac
         self.data = data
         self.N_possible_knots = N_possible_knots
+        self.min_knots = min_knots
         self.xlow = xrange[0]
         self.xhigh = xrange[1]
 
-        self.yhigh = height_prior_range[0]
-        self.ylow = height_prior_range[1]
+        self.yhigh = height_prior_range[1]
+        self.ylow = height_prior_range[0]
+        
+        self.yrange = self.yhigh - self.ylow
 
         self.interp_type = interp_type
-
-        self.available_knots = np.linspace(self.xlow, self.xhigh, num=self.N_possible_knots)
+        if log_space_xvals:
+            self.available_knots = np.logspace(np.log10(self.xlow), np.log10(self.xhigh), num=self.N_possible_knots)
+        else:
+            self.available_knots = np.linspace(self.xlow, self.xhigh, num=self.N_possible_knots)
 
         # keeps track of configuration, i.e. what points are turned on
         # or turned off.
-        self.configuration = np.ones(self.N_possible_knots, dtype=bool)
-        self.current_heights = np.ones(self.N_possible_knots)
+        # self.configuration = np.ones(self.N_possible_knots, dtype=bool)
+        self.configuration = np.random.randint(0, 2, size=self.N_possible_knots).astype(bool)
+        print(self.configuration)
+        self.current_heights = np.ones(self.N_possible_knots) * (self.yhigh - self.ylow) / 2. + self.ylow
+        self.log_output = log_output
 
 
-    def evaluate_interp_model(self, xvals_to_evaluate, heights, config):
+    def evaluate_interp_model(self, xvals_to_evaluate, heights, config, log_xvals=False):
         """
         based on the supplied configuration and heights of the knots
         evaluate the model at `xvals_to_evaluate`.
         """
+        if log_xvals:
+            knots = np.log10(self.available_knots)
+        else:
+            knots = self.available_knots
         if np.sum(config) == 0:
-            return np.zeros(xvals_to_evaluate.size)
+            if self.log_output:
+                return -np.inf * np.ones(xvals_to_evaluate.size)
+            else:
+                return np.zeros(xvals_to_evaluate.size)
         elif np.sum(config) == 1:
             return heights[config].squeeze() * np.ones(xvals_to_evaluate.size)
         elif self.interp_type == 'linear':
-            myfunc = interp1d(self.available_knots[config], heights[config],
+            myfunc = interp1d(knots[config], heights[config],
                               fill_value='extrapolate')
         elif self.interp_type == 'cubic':
-            myfunc = CubicSpline(self.available_knots[config], heights[config],
+            myfunc = CubicSpline(knots[config], heights[config],
                                  extrapolate=True)
         elif self.interp_type == 'akima':
-            myfunc = Akima1DInterpolator(self.available_knots[config], heights[config])
+            myfunc = Akima1DInterpolator(knots[config], heights[config])
             return myfunc(xvals_to_evaluate, extrapolate=True)
         else:
             raise ValueError('available spline types are "linear," "cubic" and "akima"')
@@ -73,12 +93,7 @@ class BaseSplineModel(object):
         """
         pass
 
-
     def propose_birth_move(self):
-        """
-        propose to add "turn on" one of the available knots
-        from the list of knots that are currently turned off.
-        """
         if np.sum(self.configuration) == self.N_possible_knots:
             return (-np.inf, -np.inf, self.configuration, self.current_heights)
         else:
@@ -86,30 +101,74 @@ class BaseSplineModel(object):
             new_heights = deepcopy(self.current_heights)
             new_config = deepcopy(self.configuration)
             new_config[idx_to_add] = True
-            # draw from uniform prior
+        
+        
+        
+        randnum = np.random.rand()
+        
+        # proposal height
+        height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_add],
+                                   self.current_heights, self.configuration)
+        print(idx_to_add, height_from_model)
+        if randnum < self.birth_uniform_frac:
             new_heights[idx_to_add] = np.random.rand() * (self.yhigh - self.ylow) + self.ylow
-            new_ll = self.ln_likelihood(new_config, new_heights)
-            return new_ll, 0, new_config, new_heights
+        else:
+            new_heights[idx_to_add] = norm.rvs(loc=height_from_model, scale=self.birth_gauss_scalefac, size=1)
+        
+        log_qx = 0
+        
+        log_qy = np.log(self.birth_uniform_frac / self.yrange + \
+                        (1 - self.birth_uniform_frac) * norm.pdf(new_heights[idx_to_add], loc=height_from_model,
+                                                                    scale=self.birth_gauss_scalefac))
+        
+        log_px = 0
+        
+        log_py = -np.log(self.yrange)
+        
+        new_ll = self.ln_likelihood(new_config, new_heights)
+        
+        return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights
 
-    def propose_death_move(self):
+    def propose_death_move(self, specific_idx=None):
         """
         propose to "turn off" one of the current knots that are turned on.
         """
-        if np.sum(self.configuration) == 0:
+        if np.sum(self.configuration) == self.min_knots:
             return (-np.inf, -np.inf, self.configuration, self.current_heights)
         else:
             # pick one to turn off
-            idx_to_add = np.random.choice(np.where(self.configuration)[0])
+            idx_to_remove = np.random.choice(np.where(self.configuration)[0])
             new_heights = deepcopy(self.current_heights)
             new_config = deepcopy(self.configuration)
 
             # turn it off
-            new_config[idx_to_add] = False
-            # draw from uniform prior
+            if specific_idx is None:
+                new_config[idx_to_remove] = False
+            else:
+                idx_to_remove = specific_idx
+                new_config[idx_to_remove] = False
+                
+    
+            # Find mean of the Gaussian we would have proposed from
+            height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_remove],
+                                                           self.current_heights, new_config)
+            print(idx_to_remove, height_from_model)
+            log_qx = np.log(self.birth_uniform_frac / self.yrange + \
+                              (1 - self.birth_uniform_frac) * norm.pdf(height_from_model,
+                                                                          loc=self.current_heights[idx_to_remove],
+                                                                          scale=self.birth_gauss_scalefac))
+            log_qy = 0
+            
+            log_px = -np.log(self.yrange)
+            
+            log_py = 0
 
             new_ll = self.ln_likelihood(new_config, self.current_heights)
-            return new_ll, 0, new_config, new_heights
-
+            
+            
+            
+            return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights
+    
     def propose_change_amplitude_gaussian(self):
         """
         Pick one of the knots that are turned
@@ -122,7 +181,7 @@ class BaseSplineModel(object):
         idx_to_change = np.random.choice(np.where(self.configuration)[0])
 
         # draw a "scale" factor between 1/10 and 1/3 of prior range
-        scalefac = (self.yhigh - self.ylow) * np.random.rand() * (1/3 - 1/10) + 1/10
+        scalefac = (self.yhigh - self.ylow) * (np.random.rand() * (1/10 - 1/100) + 1/100)
 
         # propose to jump an amount given by zero-mean Gaussian with standard
         # deviation given by scalefac above
@@ -140,7 +199,7 @@ class BaseSplineModel(object):
         if np.sum(self.configuration) == 0:
             return -np.inf, -np.inf, self.configuration, self.current_heights
 
-        # random point to turn on
+        # random point to change amplitude
         idx_to_change = np.random.choice(np.where(self.configuration)[0])
 
         # propose draw from prior
@@ -150,8 +209,8 @@ class BaseSplineModel(object):
         new_ll = self.ln_likelihood(self.configuration, new_heights)
         return new_ll, 0, self.configuration, new_heights
 
-    def sample(self, Niterations, proposal_weights=(10, 10, 1, 1), prior_test=False,
-               start_config=None, start_heights=None):
+    def sample(self, Niterations, proposal_weights=(1, 1, 1, 1), prior_test=False,
+               start_config=None, start_heights=None, temperature=1):
         """
         Run RJMCMC sampler
 
@@ -216,7 +275,8 @@ class BaseSplineModel(object):
             #     proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
 
             # get proposed points
-            proposed_ll, proposed_logR, proposed_config, proposed_heights = proposals[proposal_idx]()
+            tmp = proposals[proposal_idx]()
+            proposed_ll, proposed_logR, proposed_config, proposed_heights = tmp
             if prior_test:
                 proposed_ll = 0
                 
@@ -226,13 +286,13 @@ class BaseSplineModel(object):
             # this is subtle...usually the ratio of *which* proposals you choose
             # doesn't matter
             if proposal_idx == 0:
-                q = np.log(proposal_weights[1] / proposal_weights[0])
-            elif proposal_idx ==1:
-                q = np.log(proposal_weights[0] / proposal_weights[1])
+                q = np.log(proposal_weights[1] / (proposal_weights[0]))
+            elif proposal_idx == 1:
+                q = np.log((proposal_weights[0]) / proposal_weights[1])
             else:
                 q = 0
 
-            hastings_ratio = min(np.log(1), proposed_ll - current_ll + proposed_logR + q)
+            hastings_ratio = min(np.log(1), (proposed_ll - current_ll) * 1/temperature + proposed_logR + q)
             compare_val = np.log(np.random.rand())
 
             if compare_val < hastings_ratio:

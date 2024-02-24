@@ -101,18 +101,17 @@ class BaseSplineModel(object):
             new_heights = deepcopy(self.current_heights)
             new_config = deepcopy(self.configuration)
             new_config[idx_to_add] = True
-        
-        
-        
+
         randnum = np.random.rand()
         
         # proposal height
         height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_add],
-                                   self.current_heights, self.configuration)
-        print(idx_to_add, height_from_model)
+                                                       self.current_heights, self.configuration)
         if randnum < self.birth_uniform_frac:
+            # uniform draw
             new_heights[idx_to_add] = np.random.rand() * (self.yhigh - self.ylow) + self.ylow
         else:
+            # gaussian draw around height
             new_heights[idx_to_add] = norm.rvs(loc=height_from_model, scale=self.birth_gauss_scalefac, size=1)
         
         log_qx = 0
@@ -122,8 +121,12 @@ class BaseSplineModel(object):
                                                                     scale=self.birth_gauss_scalefac))
         
         log_px = 0
-        
-        log_py = -np.log(self.yrange)
+
+        # check that proposed point is in prior
+        if (new_heights[idx_to_add] <= self.yhigh) and (new_heights[idx_to_add] >= self.ylow):
+            log_py = -np.log(self.yrange)
+        else:
+            log_py = -np.inf
         
         new_ll = self.ln_likelihood(new_config, new_heights)
         
@@ -152,10 +155,10 @@ class BaseSplineModel(object):
             # Find mean of the Gaussian we would have proposed from
             height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_remove],
                                                            self.current_heights, new_config)
-            print(idx_to_remove, height_from_model)
+
             log_qx = np.log(self.birth_uniform_frac / self.yrange + \
-                              (1 - self.birth_uniform_frac) * norm.pdf(height_from_model,
-                                                                          loc=self.current_heights[idx_to_remove],
+                              (1 - self.birth_uniform_frac) * norm.pdf(self.current_heights[idx_to_remove],
+                                                                          loc=height_from_model,
                                                                           scale=self.birth_gauss_scalefac))
             log_qy = 0
             
@@ -164,8 +167,6 @@ class BaseSplineModel(object):
             log_py = 0
 
             new_ll = self.ln_likelihood(new_config, self.current_heights)
-            
-            
             
             return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights
     

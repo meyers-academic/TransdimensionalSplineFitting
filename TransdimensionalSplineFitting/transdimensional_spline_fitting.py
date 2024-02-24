@@ -122,11 +122,7 @@ class BaseSplineModel(object):
         
         log_px = 0
 
-        # check that proposed point is in prior
-        if (new_heights[idx_to_add] <= self.yhigh) and (new_heights[idx_to_add] >= self.ylow):
-            log_py = -np.log(self.yrange)
-        else:
-            log_py = -np.inf
+        log_py = self.get_height_log_prior(new_heights[idx_to_add])
         
         new_ll = self.ln_likelihood(new_config, new_heights)
         
@@ -162,7 +158,7 @@ class BaseSplineModel(object):
                                                                           scale=self.birth_gauss_scalefac))
             log_qy = 0
             
-            log_px = -np.log(self.yrange)
+            log_px = self.get_height_log_prior(self.current_heights[idx_to_remove])
             
             log_py = 0
 
@@ -190,7 +186,16 @@ class BaseSplineModel(object):
         new_heights[idx_to_change] = self.current_heights[idx_to_change] + np.random.randn() * scalefac
 
         new_ll = self.ln_likelihood(self.configuration, new_heights)
-        return new_ll, 0, self.configuration, new_heights
+        prior_change = self.get_height_log_prior(new_heights[idx_to_change])
+        if prior_change != -np.inf:
+            prior_change = 0
+
+        return new_ll, prior_change, self.configuration, new_heights
+
+    def get_height_log_prior(self, height):
+        if self.ylow <= height <= self.yhigh:
+            return -np.log(self.yrange)
+        return -np.inf
 
     def propose_change_amplitude_prior_draw(self):
         """
@@ -208,7 +213,11 @@ class BaseSplineModel(object):
         new_heights[idx_to_change] = (self.yhigh - self.ylow) * np.random.rand() + self.ylow
 
         new_ll = self.ln_likelihood(self.configuration, new_heights)
-        return new_ll, 0, self.configuration, new_heights
+
+        prior_change = self.get_height_log_prior(new_heights[idx_to_change])
+        if prior_change != -np.inf:
+            prior_change = 0
+        return new_ll, prior_change, self.configuration, new_heights
 
     def sample(self, Niterations, proposal_weights=(1, 1, 1, 1), prior_test=False,
                start_config=None, start_heights=None, temperature=1):

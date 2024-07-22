@@ -135,15 +135,8 @@ class BaseSplineModel(object):
         # log_py = self.get_height_log_prior(new_heights[idx_to_add])
         log_py = self.get_height_log_prior(new_heights[idx_to_add]) # + self.get_width_log_prior(new_knots[idx_to_add], idx_to_add)
         
-        try:
-            new_ll = self.ln_likelihood(new_config, new_heights, new_knots)
-        except ValueError as e:
-            print(new_knots)
-            print(self.xhighs, self.xlows)
-            print(np.diff(new_knots))
-            print(idx_to_add)
-            raise(e)
-        
+        new_ll = self.ln_likelihood(new_config, new_heights, new_knots)
+                
         return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights, new_knots
 
     def propose_death_move(self, specific_idx=None):
@@ -253,16 +246,7 @@ class BaseSplineModel(object):
         new_knots = deepcopy(self.available_knots)
         new_knots[idx_to_change] = np.random.rand() * (self.xhighs[idx_to_change] - self.xlows[idx_to_change]) + self.xlows[idx_to_change]
         # new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
-        try:
-            new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
-        except ValueError as e:
-            print(self.available_knots)
-            print(new_knots)
-            print(self.xhighs)
-            print(self.xlows)
-            print(np.diff(new_knots))
-            print(idx_to_change)
-            raise(e)
+        new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
         prior_change = self.get_width_log_prior(new_knots[idx_to_change], idx_to_change)
         if prior_change != -np.inf:
             prior_change = 0

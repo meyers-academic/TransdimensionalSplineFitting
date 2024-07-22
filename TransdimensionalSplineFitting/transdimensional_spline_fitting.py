@@ -48,7 +48,7 @@ class BaseSplineModel(object):
             base = np.logspace(np.log10(self.xlow), np.log10(self.xhigh), num=self.N_possible_knots + 1)
             self.xlows = base[:-1]
             self.xhighs = base[1:]
-            self.available_knots = self.xlows + self.xhighs / 2
+            self.available_knots = (self.xlows + self.xhighs) / 2
         else:
             self.deltax = (self.xhigh - self.xlow) / N_possible_knots
             self.xlows = np.arange(N_possible_knots) * self.deltax + self.xlow
@@ -252,8 +252,17 @@ class BaseSplineModel(object):
         idx_to_change = np.random.choice(np.where(self.configuration)[0])
         new_knots = deepcopy(self.available_knots)
         new_knots[idx_to_change] = np.random.rand() * (self.xhighs[idx_to_change] - self.xlows[idx_to_change]) + self.xlows[idx_to_change]
-        new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
-
+        # new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
+        try:
+            new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
+        except ValueError as e:
+            print(self.available_knots)
+            print(new_knots)
+            print(self.xhighs)
+            print(self.xlows)
+            print(np.diff(new_knots))
+            print(idx_to_change)
+            raise(e)
         prior_change = self.get_width_log_prior(new_knots[idx_to_change], idx_to_change)
         if prior_change != -np.inf:
             prior_change = 0

@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 class BaseSplineModel(object):
     def __init__(self, data, N_possible_knots, xrange, height_prior_range, interp_type='linear', log_output=False,
-                 log_space_xvals=True, birth_uniform_frac=0.5, min_knots=2, birth_gauss_scalefac=1):
+                 log_space_xvals=False, birth_uniform_frac=0.5, min_knots=2, birth_gauss_scalefac=1):
         """
         Params:
         ------
@@ -33,8 +33,9 @@ class BaseSplineModel(object):
         self.data = data
         self.N_possible_knots = N_possible_knots
         self.min_knots = min_knots
-        self.xlow = xrange[0]
+        self.xlow = xrange[0] + 1e-3
         self.xhigh = xrange[1]
+
 
         self.yhigh = height_prior_range[1]
         self.ylow = height_prior_range[0]
@@ -43,28 +44,32 @@ class BaseSplineModel(object):
 
         self.interp_type = interp_type
         if log_space_xvals:
-            self.available_knots = np.logspace(np.log10(self.xlow), np.log10(self.xhigh), num=self.N_possible_knots)
+            # raise NotImplementedError('log_space_xvals not implemented at the moment')
+            base = np.logspace(np.log10(self.xlow), np.log10(self.xhigh), num=self.N_possible_knots + 1)
+            self.xlows = base[:-1]
+            self.xhighs = base[1:]
+            self.available_knots = self.xlows + self.xhighs / 2
         else:
-            self.available_knots = np.linspace(self.xlow, self.xhigh, num=self.N_possible_knots)
+            self.deltax = (self.xhigh - self.xlow) / N_possible_knots
+            self.xlows = np.arange(N_possible_knots) * self.deltax + self.xlow
+            self.xhighs = self.xlows + self.deltax
+            self.available_knots = np.linspace(self.xlow + self.deltax / 2, self.xhigh - self.deltax / 2, num=self.N_possible_knots)
 
         # keeps track of configuration, i.e. what points are turned on
         # or turned off.
         # self.configuration = np.ones(self.N_possible_knots, dtype=bool)
         self.configuration = np.random.randint(0, 2, size=self.N_possible_knots).astype(bool)
-        print(self.configuration)
         self.current_heights = np.ones(self.N_possible_knots) * (self.yhigh - self.ylow) / 2. + self.ylow
         self.log_output = log_output
 
 
-    def evaluate_interp_model(self, xvals_to_evaluate, heights, config, log_xvals=False):
+    def evaluate_interp_model(self, xvals_to_evaluate, heights, config, knots, log_xvals=False):
         """
         based on the supplied configuration and heights of the knots
         evaluate the model at `xvals_to_evaluate`.
         """
         if log_xvals:
-            knots = np.log10(self.available_knots)
-        else:
-            knots = self.available_knots
+            knots = np.log10(knots)
         if np.sum(config) == 0:
             if self.log_output:
                 return -np.inf * np.ones(xvals_to_evaluate.size)
@@ -86,7 +91,7 @@ class BaseSplineModel(object):
         return myfunc(xvals_to_evaluate)
 
     @abstractmethod
-    def ln_likelihood(self, config, heights):
+    def ln_likelihood(self, config, heights, knot_locations):
         """
         You will need to implement this yourself. It will take the model, and put it into whatever space
         it needs to be in to calculate your likelihood, and then calculate the likelihood.
@@ -95,7 +100,7 @@ class BaseSplineModel(object):
 
     def propose_birth_move(self):
         if np.sum(self.configuration) == self.N_possible_knots:
-            return (-np.inf, -np.inf, self.configuration, self.current_heights)
+            return (-np.inf, -np.inf, self.configuration, self.current_heights, self.available_knots)
         else:
             idx_to_add = np.random.choice(np.where(~self.configuration)[0])
             new_heights = deepcopy(self.current_heights)
@@ -104,15 +109,20 @@ class BaseSplineModel(object):
 
         randnum = np.random.rand()
         
+        # random choice of knot location within bounds
+        new_knots = self.available_knots
+        new_knots[idx_to_add] = np.random.rand() * (self.xhighs[idx_to_add] - self.xlows[idx_to_add]) + self.xlows[idx_to_add]
+
         # proposal height
-        height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_add],
-                                                       self.current_heights, self.configuration)
+        height_from_model = self.evaluate_interp_model(new_knots[idx_to_add],
+                                                       self.current_heights, self.configuration, self.available_knots)
         if randnum < self.birth_uniform_frac:
             # uniform draw
             new_heights[idx_to_add] = np.random.rand() * (self.yhigh - self.ylow) + self.ylow
         else:
             # gaussian draw around height
             new_heights[idx_to_add] = norm.rvs(loc=height_from_model, scale=self.birth_gauss_scalefac, size=1)
+
         
         log_qx = 0
         
@@ -122,18 +132,26 @@ class BaseSplineModel(object):
         
         log_px = 0
 
-        log_py = self.get_height_log_prior(new_heights[idx_to_add])
+        # log_py = self.get_height_log_prior(new_heights[idx_to_add])
+        log_py = self.get_height_log_prior(new_heights[idx_to_add]) # + self.get_width_log_prior(new_knots[idx_to_add], idx_to_add)
         
-        new_ll = self.ln_likelihood(new_config, new_heights)
+        try:
+            new_ll = self.ln_likelihood(new_config, new_heights, new_knots)
+        except ValueError as e:
+            print(new_knots)
+            print(self.xhighs, self.xlows)
+            print(np.diff(new_knots))
+            print(idx_to_add)
+            raise(e)
         
-        return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights
+        return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights, new_knots
 
     def propose_death_move(self, specific_idx=None):
         """
         propose to "turn off" one of the current knots that are turned on.
         """
         if np.sum(self.configuration) == self.min_knots:
-            return (-np.inf, -np.inf, self.configuration, self.current_heights)
+            return (-np.inf, -np.inf, self.configuration, self.current_heights, self.available_knots)
         else:
             # pick one to turn off
             idx_to_remove = np.random.choice(np.where(self.configuration)[0])
@@ -150,7 +168,7 @@ class BaseSplineModel(object):
     
             # Find mean of the Gaussian we would have proposed from
             height_from_model = self.evaluate_interp_model(self.available_knots[idx_to_remove],
-                                                           self.current_heights, new_config)
+                                                           self.current_heights, new_config, self.available_knots)
 
             log_qx = np.log(self.birth_uniform_frac / self.yrange + \
                               (1 - self.birth_uniform_frac) * norm.pdf(self.current_heights[idx_to_remove],
@@ -158,13 +176,13 @@ class BaseSplineModel(object):
                                                                           scale=self.birth_gauss_scalefac))
             log_qy = 0
             
-            log_px = self.get_height_log_prior(self.current_heights[idx_to_remove])
+            log_px = self.get_height_log_prior(self.current_heights[idx_to_remove]) # + self.get_width_log_prior(self.available_knots[idx_to_remove], idx_to_remove)
             
             log_py = 0
 
-            new_ll = self.ln_likelihood(new_config, self.current_heights)
+            new_ll = self.ln_likelihood(new_config, self.current_heights, self.available_knots)
             
-            return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights
+            return new_ll, (log_py - log_px) + (log_qx - log_qy), new_config, new_heights, self.available_knots
     
     def propose_change_amplitude_gaussian(self):
         """
@@ -174,7 +192,7 @@ class BaseSplineModel(object):
         """
         # random point to turn on
         if np.sum(self.configuration) == 0:
-            return -np.inf, -np.inf, self.configuration, self.current_heights
+            return -np.inf, -np.inf, self.configuration, self.current_heights, self.available_knots
         idx_to_change = np.random.choice(np.where(self.configuration)[0])
 
         # draw a "scale" factor between 1/10 and 1/3 of prior range
@@ -185,16 +203,22 @@ class BaseSplineModel(object):
         new_heights = deepcopy(self.current_heights)
         new_heights[idx_to_change] = self.current_heights[idx_to_change] + np.random.randn() * scalefac
 
-        new_ll = self.ln_likelihood(self.configuration, new_heights)
+        new_ll = self.ln_likelihood(self.configuration, new_heights, self.available_knots)
         prior_change = self.get_height_log_prior(new_heights[idx_to_change])
         if prior_change != -np.inf:
             prior_change = 0
 
-        return new_ll, prior_change, self.configuration, new_heights
+        return new_ll, prior_change, self.configuration, new_heights, self.available_knots
+
 
     def get_height_log_prior(self, height):
         if self.ylow <= height <= self.yhigh:
             return -np.log(self.yrange)
+        return -np.inf
+
+    def get_width_log_prior(self, val, idx):
+        if self.xlows[idx] <= val <= self.xhighs[idx]:
+            return -np.log(self.xhighs[idx] - self.xlows[idx])
         return -np.inf
 
     def propose_change_amplitude_prior_draw(self):
@@ -202,9 +226,9 @@ class BaseSplineModel(object):
         choose one of the knots that are turned on and propose
         a new height that is drawn from the prior.
         """
-        if np.sum(self.configuration) == 0:
-            return -np.inf, -np.inf, self.configuration, self.current_heights
 
+        if np.sum(self.configuration) == 0:
+            return -np.inf, -np.inf, self.configuration, self.current_heights, self.available_knots
         # random point to change amplitude
         idx_to_change = np.random.choice(np.where(self.configuration)[0])
 
@@ -212,14 +236,31 @@ class BaseSplineModel(object):
         new_heights = deepcopy(self.current_heights)
         new_heights[idx_to_change] = (self.yhigh - self.ylow) * np.random.rand() + self.ylow
 
-        new_ll = self.ln_likelihood(self.configuration, new_heights)
+        new_ll = self.ln_likelihood(self.configuration, new_heights, self.available_knots)
 
         prior_change = self.get_height_log_prior(new_heights[idx_to_change])
         if prior_change != -np.inf:
             prior_change = 0
-        return new_ll, prior_change, self.configuration, new_heights
+        return new_ll, prior_change, self.configuration, new_heights, self.available_knots
 
-    def sample(self, Niterations, proposal_weights=(1, 1, 1, 1), prior_test=False,
+    def propose_change_knot_location(self):
+        """change the location of one of the knots that are turned on
+        """
+        if np.sum(self.configuration) == 0:
+            return -np.inf, -np.inf, self.configuration, self.current_heights, self.available_knots
+        # find a knot that is turned on and change its location
+        idx_to_change = np.random.choice(np.where(self.configuration)[0])
+        new_knots = deepcopy(self.available_knots)
+        new_knots[idx_to_change] = np.random.rand() * (self.xhighs[idx_to_change] - self.xlows[idx_to_change]) + self.xlows[idx_to_change]
+        new_ll = self.ln_likelihood(self.configuration, self.current_heights, new_knots)
+
+        prior_change = self.get_width_log_prior(new_knots[idx_to_change], idx_to_change)
+        if prior_change != -np.inf:
+            prior_change = 0
+        return new_ll, prior_change, self.configuration, self.current_heights, new_knots
+        
+
+    def sample(self, Niterations, proposal_weights=(1, 1, 1, 1, 1), prior_test=False,
                start_config=None, start_heights=None, temperature=1):
         """
         Run RJMCMC sampler
@@ -262,6 +303,7 @@ class BaseSplineModel(object):
                 print('Start heights you entered is not compatible...starting with heights at zero')
         configurations = np.zeros((Niterations, self.N_possible_knots))
         heights = np.zeros((Niterations, self.N_possible_knots))
+        knots = np.zeros((Niterations, self.N_possible_knots))
 
         acceptances = np.zeros(Niterations, dtype=bool)
         move_types = np.zeros(Niterations, dtype=int)
@@ -272,21 +314,18 @@ class BaseSplineModel(object):
 
         # list of functions for proposals
         proposals = [self.propose_birth_move, self.propose_death_move,
-                     self.propose_change_amplitude_prior_draw, self.propose_change_amplitude_gaussian]
+                     self.propose_change_amplitude_prior_draw, self.propose_change_amplitude_gaussian,
+                     self.propose_change_knot_location]
 
         for ii in tqdm(range(Niterations)):
             # choose proposal
             myval = np.random.rand()
             # choose proposal function with weights that were specified
             proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
-            # while np.sum(self.configuration) == 0 and proposal_idx == 1:
-            #     proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
-            # while np.sum(self.configuration) == np.size(self.configuration) and proposal_idx == 0:
-            #     proposal_idx = np.random.choice(np.arange(len(proposals)), p=np.array(proposal_weights) / np.sum(proposal_weights))
 
             # get proposed points
             tmp = proposals[proposal_idx]()
-            proposed_ll, proposed_logR, proposed_config, proposed_heights = tmp
+            proposed_ll, proposed_logR, proposed_config, proposed_heights, proposed_knots = tmp
             if prior_test:
                 proposed_ll = 0
                 
@@ -308,6 +347,7 @@ class BaseSplineModel(object):
             if compare_val < hastings_ratio:
                 self.configuration = proposed_config
                 self.current_heights = proposed_heights
+                self.available_knots = proposed_knots
                 current_ll = proposed_ll
                 acc = True
             else:
@@ -315,20 +355,22 @@ class BaseSplineModel(object):
 
             configurations[ii] = self.configuration
             heights[ii] = self.current_heights
+            knots[ii] = self.available_knots
             acceptances[ii] = acc
             move_types[ii] = proposal_idx
             lls[ii] = current_ll
 
-        return SamplerResults(acceptances, configurations, heights, lls, move_types)
+        return SamplerResults(acceptances, configurations, heights, knots, lls, move_types)
 
 
 class SamplerResults(object):
-    def __init__(self, acceptances, configurations, heights, lls, move_types):
+    def __init__(self, acceptances, configurations, heights, knots, lls, move_types):
         self.acceptances = acceptances
         self.configurations = configurations
         self.heights = heights
         self.lls = lls
         self.move_types = move_types
+        self.knots = knots
 
 
 class SmoothCurveDataObj(object):
@@ -350,7 +392,7 @@ class FitSmoothCurveModel(BaseSplineModel):
     You also need to create a simple data class to go along with this. This
     allows the sampler to be used with arbitrary forms of data...
     """
-    def ln_likelihood(self, config, heights):
+    def ln_likelihood(self, config, heights, knots):
         """
         Simple Gaussian log likelihood where the data are just simply
         points in 2D space that we're trying to fit.
@@ -364,5 +406,5 @@ class FitSmoothCurveModel(BaseSplineModel):
         """
         # be careful of `evaluate_interp_model` function! it does require you to give a list of xvalues,
         # which don't exist in the base class!
-        model = self.evaluate_interp_model(self.data.data_xvals, heights, config)
+        model = self.evaluate_interp_model(self.data.data_xvals, heights, config, knots)
         return np.sum(norm.logpdf(model - self.data.data_yvals, scale=self.data.data_errors))
